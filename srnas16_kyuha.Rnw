@@ -1,0 +1,408 @@
+\documentclass[a4paper,10pt]{article}
+\usepackage{fullpage}
+\usepackage{amsmath}
+\usepackage[german]{babel}
+\usepackage{underscore}
+\usepackage{listings}
+%%\usepackage{tikz,hyperref}
+\title{smallRNA analysis for Kyuhas project: Wt, Pie1,arp6}
+\begin{document}
+\maketitle
+\small
+%% library(knitr); knit('srnas16_kyuha.Rnw')
+%% make -f ~/knitr.mk srnas16_kyuha.tex
+%% c("normalsize", "tiny", "scriptsize", "footnotesize", "small", "large", "Large", "LARGE", "huge", "Huge"),
+<<setup, include=FALSE>>=
+library(Biostrings)
+library(ggplot2)
+library(rtracklayer)
+library(ShortRead)
+library(reshape2)
+library(edgeR)
+library(baySeq)
+opts_chunk$set(size = 'footnotesize')
+#results='asis' for latex
+#This is all you need to do if you want to use the listings package:
+#render_listings()
+# global chunk options
+opts_chunk$set(cache=TRUE, autodep=TRUE)
+knit_hooks$set(crop = hook_pdfcrop)
+#dep_auto() # figure out dependencies automatically
+#options(width = 65)
+# smaller font size for chunks
+#opts_chunk$set(size = 'footnotesize', background='white', cache=TRUE)
+#tikz
+#\begin{frame}
+#<<boring-plots, echo=FALSE, dev='tikz', fig.width=4.4, fig.height=3.3, out.width='.9\\paperwidth'>>=
+#par(mar = c(4.5, 4, .1, .1))
+#hist(x, main='', xlab='$x$ (how the fonts look like here?)',
+#  ylab='$\\hat{f}(x) = \\frac{1}{nh}\\sum_{i=1}^n \\cdots$')
+@
+#\end{frame}
+
+
+#Notes reads might be an object where coverage and width oberactions are definded such as
+# GenomicRanges: e.g. the @alignments slot from alignmentData Object (segmentSeq::readBAM)
+#  important: the obove one is intended to read in non-redudant reads, which come with counts
+#  for the readBAM function this needs to be specified (e.g. countID="XS") and is than stored in the @data slot
+#  to put this in the GenomicRanges range object, create a "count" column like this
+#  alignData@alignments$counts <- as.integer(alignData@data[[1]]) which can than be utilized by the coverage function!
+# GappedAlignments: produced by Rsamtools::readBamGappedAlignments
+
+\subsection{preprocessing: small RNA data from January 2016}
+\begin{verbatim}
+cd /projects/sebastian_mueller/kyuha_choi/
+-sequencing on next-seq
+-phred33 ( Illumina 1.9)
+-AGATCGGAAGAGC adapter
+
+for file in $(ls *L001*.fastq.gz); do
+	outfile=${file//L00?_R1_001/pooled}	
+	list_infiles=$(ls ${file//L00?_R1_001/*})
+	echo -e "--\ncreating "$outfile
+	ls -Llhtr $list_infiles
+	zcat $list_infiles | gzip > $outfile
+done
+
+export PATH=/applications/trim_galore/v0_4_1/:/applications/cutadapt/cutadapt-1.3/bin/:/applications/bowtie/bowtie-1.1.1/:$PATH
+
+file=pie1-smRNA-lib-9_S12_pooled.fastq.gz
+for file in $(ls *pooled*fastq.gz); do
+	trim_galore --phred33 --illumina --length 15 $file
+done
+
+index=/data/public_data/arabidopsis/TAIR_9/arabidopsis_genome
+chrsizes=/data/public_data/arabidopsis/TAIR_9/ar.chrom.sizes.txt
+
+file=pie1-smRNA-lib-9_S12_pooled_trimmed.fq.gz
+file=wt-smRNA-lib-3_S7_pooled.fastq.gz
+
+##unique mapping
+for file in $(ls *trimmed.fq.gz); do
+	echo "processing" $file;
+	echo "gzip -dc $file | bowtie $index -q - -v 0 -m 1 -S ${file%.fq.gz}.perfect.unique.sam -p 8 2> ${file%.fq.gz}.perfect.unique.bowtielog; /scripts/sam2bw.sh ${file%.fq.gz}.perfect.unique.sam $chrsizes" > ${file%.fq.gz}.perfect.unique.sh
+	/scripts/csmit -c 8 -m 12G -b "bash ${file%.fq.gz}.perfect.unique.sh"
+	sleep 100
+done
+
+##multi
+##multi with up to 100 alingment being reported (k=100)
+for file in $(ls *trimmed.fq.gz); do
+	echo "processing" $file;
+	echo "gzip -dc $file | bowtie $index -q - -v 0 -k 100 -S ${file%.fq.gz}.perfect.multi.sam -p 8 2> ${file%.fq.gz}.perfect.multi.bowtielog; /scripts/sam2bw.sh ${file%.fq.gz}.perfect.multi.sam $chrsizes" > ${file%.fq.gz}.perfect.multi.sh
+	/scripts/csmit -c 8 -m 12G -b "bash ${file%.fq.gz}.perfect.multi.sh"
+	sleep 200
+done
+
+##multi with only 1 alingment being reported (k=1)
+for file in $(ls *trimmed.fq.gz); do
+	echo "processing" $file;
+	echo "gzip -dc $file | bowtie $index -q - -v 0 -k 1 -S ${file%.fq.gz}.perfect.multi.k1.sam -p 8 2> ${file%.fq.gz}.perfect.multi.k1.bowtielog; /scripts/sam2bw.sh ${file%.fq.gz}.perfect.multi.k1.sam $chrsizes" > ${file%.fq.gz}.perfect.multi.k1.sh
+	/scripts/csmit -c 8 -m 12G -b "bash ${file%.fq.gz}.perfect.multi.k1.sh"
+	sleep 500
+done
+
+#bam=wt-smRNA-lib-3_S7_pooled_trimmed.perfect.multi.bam
+#samtools view -bhF 4 $bam > ${bam%.bam}.onlymapped.bam
+#samtools view $file | awk ' length($10)>19 && length($10)<25' | cut -f10,18 > $file.short
+#samtools view $file | cut -f10,18 > $file.short
+#samtools view ${bam%.bam}.onlymapped.bam | cut -f10,18  | sort | uniq -c > ${bam}.short2
+
+for bam in $(ls *k1*bam); do
+	samtools view $bam | cut -f10,18  | sort | uniq -c > ${bam%.bam}.countlist
+	#samtools view -hF 4 $bam | cut -f10,18  | sort | uniq -c > ${bam%.bam}.onlymapped.countlist
+done
+\end{verbatim}
+
+\begin{verbatim}
+sm934@node1:/projects/sebastian_mueller/kyuha_choi/raw$ grep "Trimmed reads:" *report.txt
+arp6-smRNA-lib-5_S11_pooled.fastq.gz_trimming_report.txt:     Trimmed reads:     34620393 (99.8%)
+arp6-smRNA-lib-6_S1_pooled.fastq.gz_trimming_report.txt:     Trimmed reads:     32553386 (99.8%)
+arp6-smRNA-lib-7_S9_pooled.fastq.gz_trimming_report.txt:     Trimmed reads:     28472768 (99.7%)
+arp6-smRNA-lib-8_S4_pooled.fastq.gz_trimming_report.txt:     Trimmed reads:     36371091 (99.8%)
+pie1-smRNA-lib-10_S5_pooled.fastq.gz_trimming_report.txt:     Trimmed reads:     36550512 (99.8%)
+pie1-smRNA-lib-11_S6_pooled.fastq.gz_trimming_report.txt:     Trimmed reads:     30600759 (99.8%)
+pie1-smRNA-lib-12_S3_pooled.fastq.gz_trimming_report.txt:     Trimmed reads:     35492786 (99.8%)
+pie1-smRNA-lib-9_S12_pooled.fastq.gz_trimming_report.txt:     Trimmed reads:     25114295 (99.8%)
+wt-smRNA-lib-1_S8_pooled.fastq.gz_trimming_report.txt:     Trimmed reads:     31861193 (99.8%)
+wt-smRNA-lib-2_S2_pooled.fastq.gz_trimming_report.txt:     Trimmed reads:     32165304 (99.8%)
+wt-smRNA-lib-3_S7_pooled.fastq.gz_trimming_report.txt:     Trimmed reads:     27178965 (99.8%)
+wt-smRNA-lib-4_S10_pooled.fastq.gz_trimming_report.txt:     Trimmed reads:     31318959 (99.8%)
+
+sm934@node1:/projects/sebastian_mueller/kyuha_choi/raw$ grep "length cutoff" *report.txt
+arp6-smRNA-lib-5_S11_pooled.fastq.gz_trimming_report.txt:Sequences removed because they became shorter than the length cutoff of 15 bp: 779264 (2.2%)
+arp6-smRNA-lib-6_S1_pooled.fastq.gz_trimming_report.txt:Sequences removed because they became shorter than the length cutoff of 15 bp:  493446 (1.5%)
+arp6-smRNA-lib-7_S9_pooled.fastq.gz_trimming_report.txt:Sequences removed because they became shorter than the length cutoff of 15 bp:  1139308 (4.0%)
+arp6-smRNA-lib-8_S4_pooled.fastq.gz_trimming_report.txt:Sequences removed because they became shorter than the length cutoff of 15 bp:  2436655 (6.7%)
+pie1-smRNA-lib-10_S5_pooled.fastq.gz_trimming_report.txt:Sequences removed because they became shorter than the length cutoff of 15 bp: 1268805 (3.5%)
+pie1-smRNA-lib-11_S6_pooled.fastq.gz_trimming_report.txt:Sequences removed because they became shorter than the length cutoff of 15 bp: 339361 (1.1%)
+pie1-smRNA-lib-12_S3_pooled.fastq.gz_trimming_report.txt:Sequences removed because they became shorter than the length cutoff of 15 bp: 1391112 (3.9%)
+pie1-smRNA-lib-9_S12_pooled.fastq.gz_trimming_report.txt:Sequences removed because they became shorter than the length cutoff of 15 bp: 1245727 (5.0%)
+wt-smRNA-lib-1_S8_pooled.fastq.gz_trimming_report.txt:Sequences removed because they became shorter than the length cutoff of 15 bp:    673120 (2.1%)
+wt-smRNA-lib-2_S2_pooled.fastq.gz_trimming_report.txt:Sequences removed because they became shorter than the length cutoff of 15 bp:    1252813 (3.9%)
+wt-smRNA-lib-3_S7_pooled.fastq.gz_trimming_report.txt:Sequences removed because they became shorter than the length cutoff of 15 bp:    757390 (2.8%)
+wt-smRNA-lib-4_S10_pooled.fastq.gz_trimming_report.txt:Sequences removed because they became shorter than the length cutoff of 15 bp:   882662 (2.8%)
+
+sm934@node1:/projects/sebastian_mueller/kyuha_choi/raw$ grep "Processed reads" *report.txt
+arp6-smRNA-lib-5_S11_pooled.fastq.gz_trimming_report.txt:   Processed reads:     34696114
+arp6-smRNA-lib-6_S1_pooled.fastq.gz_trimming_report.txt:   Processed reads:     32626475
+arp6-smRNA-lib-7_S9_pooled.fastq.gz_trimming_report.txt:   Processed reads:     28569525
+arp6-smRNA-lib-8_S4_pooled.fastq.gz_trimming_report.txt:   Processed reads:     36458168
+pie1-smRNA-lib-10_S5_pooled.fastq.gz_trimming_report.txt:   Processed reads:     36624953
+pie1-smRNA-lib-11_S6_pooled.fastq.gz_trimming_report.txt:   Processed reads:     30669029
+pie1-smRNA-lib-12_S3_pooled.fastq.gz_trimming_report.txt:   Processed reads:     35558871
+pie1-smRNA-lib-9_S12_pooled.fastq.gz_trimming_report.txt:   Processed reads:     25157114
+wt-smRNA-lib-1_S8_pooled.fastq.gz_trimming_report.txt:   Processed reads:     31920378
+wt-smRNA-lib-2_S2_pooled.fastq.gz_trimming_report.txt:   Processed reads:     32231000
+wt-smRNA-lib-3_S7_pooled.fastq.gz_trimming_report.txt:   Processed reads:     27239175
+wt-smRNA-lib-4_S10_pooled.fastq.gz_trimming_report.txt:   Processed reads:     31387520
+
+\end{verbatim}
+
+
+<<eval=FALSE,echo=T>>=
+merging<-function(x,y) merge(x,y,by='X9',all=T)
+chrs <- c("Chr1", "Chr2", "Chr3", "Chr4", "Chr5","mitochondria","chloroplast")
+chrlens <- c(30427671, 19698289, 23459830, 18585056, 26975502,154478,366924)
+path <- "/projects/sebastian_mueller/kyuha_choi/raw"
+fls <- list.files(path, pattern="onlymapped.countlist$", full.names =F)
+#microRNAs2 <- readDNAStringSet("/home/sm934/analysis/jake/mature_miRNAsAT_modUT.fa")
+microRNAs <- readDNAStringSet("/data/public_data/mirBase/mature_miRNAs_r21_UtoT_Ath.fa")
+tasiRNAs <- readDNAStringSet("/projects/sebastian_mueller/kyuha_choi/tasi_sequences/ta_siRNA_sequences.fa")
+groupdf <- NULL
+groupdf$libnr <- sapply(strsplit(fls,"_"),function(x) x[2])
+groupdf$line <- sapply(strsplit(fls,"-"),function(x) x[1])
+groupdf$mapping <- rep("multi",length(fls))
+groupdf$Rep <- rep(1:4,3)
+groupdf <- as.data.frame(groupdf)
+rownames(groupdf) <- fls 
+levels(groupdf$line) <- c("arp6","pie1","WT")
+groupdf$line <- factor(groupdf$line, levels=c("WT","arp6","pie1"))
+groupdf.small <- groupdf[-grep("pie1",rownames(groupdf)),]
+
+##reading in data
+setwd(path)
+fls_list_counts <- list()
+for (file in fls) { fls_list_counts[[file]] <-read.table(file, row.names=NULL,colClasses = c("numeric","character")) } 
+cnt <- Reduce(merging,fls_list_counts)     #merge into a count_table for all sRNA species
+colnames(cnt) <- c("sequence",paste(sapply(strsplit(fls,"-"),function(x) x[[1]]),1:4,sep="_","multi"))
+cnt[is.na(cnt)]<-0
+cnt$width <- nchar(cnt$sequence)
+
+##annoating miRNAs
+#as.character(microRNAs) %in% as.character(microRNAs)[1]
+cnt$is.miRNA <- cnt$sequence %in% as.character(microRNAs)
+cnt$miRNA <- cnt$is.miRNA 
+cnt$is.tasiRNA <- cnt$sequence %in% as.character(tasiRNAs)
+cnt$tasiRNA <- cnt$is.tasiRNA 
+
+for (mi in which(cnt$is.miRNA)) {
+	cnt$miRNA[mi] <- names(microRNAs)[as.character(microRNAs) %in% cnt$sequence[mi]][1]
+}
+for (tasi in which(cnt$is.tasiRNA)) {
+	cnt$tasiRNA[tasi] <- names(tasiRNAs)[as.character(tasiRNAs) %in% cnt$sequence[tasi]][1]
+}
+#midf <- cnt[which(cnt$miRNA),]
+
+
+
+##normalizing
+data <- cnt[,2:13]
+cnt.23to24 <- cnt[cnt$width %in% 23:24,]
+cnt.21to24 <- cnt[cnt$width %in% 21:24,]
+data24 <- cnt.23to24[,2:13]
+lib.sizes <- calcNormFactors(data) * colSums(data)
+#lib.sizes24 <- calcNormFactors(data24,method="upperquartile",p=0.9) * colSums(data24) ##doesn't work
+lib.sizes24 <- calcNormFactors(data24) * colSums(data24) 
+###needs changing for different normalization!!
+cntn <- t(t(data * mean(lib.sizes24))  / lib.sizes24)
+#from baySeq::topCounts
+#selData <- round(selData/observables$libsizes * exp(mean(log(observables$libsizes)))/observables$seglens*exp(mean(log(observables$seglens))))
+
+#cntn <- t(t(data * mean(lib.sizes))  / lib.sizes) #old
+#Tom suggestes quartile instead of TMM:
+#lib.sizes.quant <- colSums(data[quantile(rowSums(data),probs=0.9) > rowSums(data),])
+#lib.sizes.quant.24 <- colSums(data24[quantile(rowSums(data24),probs=0.9) > rowSums(data24),])
+
+#xount Data doesnt take adata set this big it seems
+cntn.annot <- cnt
+cntn.annot[,2:13] <- round(cntn,1) 
+cntn.annot.high <- cntn.annot[rowSums(cntn)>100,]
+cntn.annot.miRs <- cntn.annot[cntn.annot$is.miRNA,]
+cntn.annot.tasiRs <- cntn.annot[cntn.annot$is.tasiRNA,]
+
+pdf(file="boxplot_counts_WTvsArp6.pdf", width=14,height=14)
+boxplot(log2(cnt[rowSums(cntn)>100,2:13]+0.1))
+dev.off()
+pdf(file="boxplot_counts_WTvsArp6_normalized.pdf", width=14,height=14)
+boxplot(log2(cntn.annot.high[2:13]+0.1))
+dev.off()
+##looking at data
+cntn_agg <- aggregate(cntn.annot[,2:13], list(size = cnt$width), sum)
+cntn_agg_pcts <-  t(t(cntn_agg[,-1]) * 100 / colSums(cntn_agg[,-1]))
+cntn_agg_pcts2124 <-  t(t(cntn_agg[cntn_agg$size %in% 20:24,-1]) * 100 / colSums(cntn_agg[cntn_agg$size %in% 20:24,-1]))
+rownames(cntn_agg_pcts) <- cntn_agg$size
+rownames(cntn_agg_pcts2124) <- 20:24
+save(cnt,cntn.annot,cntn_agg,cntn_long,file="srna_counts.rdata")
+
+@
+
+<<analysis>>=
+load("srna_counts.rdata")
+#cnt_long <- melt(tmp,id.vars=c("sequence","width"))
+cntn_long <- melt(cntn_agg,id.vars=c("size"))
+cntn_long$line <- rep(groupdf$line,each=nrow(cntn_agg))
+cntn_long$libnr <- rep(groupdf$libnr,each=nrow(cntn_agg))
+cntn_long$Rep <- rep(groupdf$Rep,each=nrow(cntn_agg))
+
+cnt_long <- melt(tmp,id.vars=c("sequence","width"))
+cntn_long_pct <- melt(cntn_agg_pcts,id.vars=c("size"))
+cntn_long_pct$line <- rep(groupdf$line,each=nrow(cntn_agg_pcts))
+cntn_long_pct$libnr <- rep(groupdf$libnr,each=nrow(cntn_agg_pcts))
+cntn_long_pct$Rep <- rep(groupdf$Rep,each=nrow(cntn_agg_pcts))
+colnames(cntn_long_pct)[1] <- "size"
+
+cntn_long_pct2124 <- melt(cntn_agg_pcts2124,id.vars=c("size"))
+cntn_long_pct2124$line <- rep(groupdf$line,each=nrow(cntn_agg_pcts2124))
+cntn_long_pct2124$libnr <- rep(groupdf$libnr,each=nrow(cntn_agg_pcts2124))
+cntn_long_pct2124$Rep <- rep(groupdf$Rep,each=nrow(cntn_agg_pcts2124))
+colnames(cntn_long_pct2124)[1] <- "size"
+
+
+tmp <- which(cntn.annot$is.miRNA)
+write.csv(cntn.annot[sort(c(tmp,tmp+1,tmp-1)),-15],file="microRNAs_normalized_counts.csv")
+tmp <- which(cntn.annot$is.tasiRNA)
+write.csv(cntn.annot[tmp,],file="tasiRNAs_normalized_counts.csv")
+
+##ploting MAs 
+CD <- new("countData", data = as.matrix(cntn.annot.high[,2:13]), replicates = groupdf$line, groups =  list(NDE = rep(1,12), DE = rep(1:3,each=4)),annotation=cntn.annot.high[,c(1,14:16)])
+libsizes(CD) <- lib.sizes
+
+######stats
+CDu <- new("countData", data = as.matrix(cnt[,c(2:5,10:13)]), replicates = groupdf$line[c(1:4,9:12)], groups =  list(NDE = rep(1,8), DE = rep(1:2,each=4)),annotation=cntn.annot[,c(1,14:16)])
+libsizes(CDu) <- lib.sizes24[c(1:4,9:12)]
+#libsizes(CD) <- getLibsizes(CD,estimationType="edgeR")
+cl <- makeCluster(24, type = "SOCK")
+CDu.high <- CDu[rowSums(CDu@data)>100,]
+CDu.high.pr <- getPriors.NB(CDu.high, samplesize = 1e5, estimation = "QL", cl = cl)
+CDmi = CDu.high.pr
+CDmi@data <- as.matrix(cnt[cnt$is.miRNA,c(2:5,10:13)])
+CDmi@annotation <- cnt[cnt$is.miRNA,c(1,14:16)]
+#only calculate posteriors for miRNAs
+#CDu.high.po <- getLikelihoods(CDu.high.pr[CDu.high.pr@annotation$is.miRNA,], pET = 'BIC', cl = cl)
+CDmi.po <- getLikelihoods(CDmi, pET = 'BIC', cl = cl)
+tc <- topCounts(CDmi.po, group = 2,number=nrow(CDmi.po),normaliseData = TRUE)
+write.csv(tc,file="Arabidpsis_DEsmallRNAs_WTvsArp6_statistics.csv")
+
+####plotting miRNAs
+
+for (i in 1:nrow(tc)) 	{
+#for (i in 1:3) 	{
+	miRNAdf <- groupdf.small
+	miRNAdf$value <- as.numeric(tc[i,5:12])
+	mirname <- strsplit(tc[i,"miRNA"]," ")[[1]][5]
+	gg <- ggplot(miRNAdf, aes(y=value, x=line)) + geom_boxplot(color="grey") + geom_point(size=2) + labs(title=mirname,x="",y="Normalized read counts")  + scale_x_discrete("", labels=expression(WT, italic(arp6)))
+	save_plot(paste0("boxplot_",mirname,".pdf"),gg)
+}
+#######
+
+png(file="MAplot_WTvsArp6.png", width=1800,height=1400)
+mau <- plotMA.CDreturn(CDu, samplesA = "WT", samplesB = "arp6",main="MA Plot: WT vs arp6",font.main=3,col=1, pch=16, cex=1, normaliseData=F, ylab="M (log2(arp6) - log2(WT))")
+mau[,"M"] <- -mau[,"M"] #mirrowing M values for interpretation purposes (arp down = M < 0)
+#points(mau[CD@annotation$width==24,c(2,1)],col="green")
+#points(mau[CD@annotation$width==21,c(2,1)],col="orange")
+tmp=mau[CDu@annotation$is.miRNA,c(2,1)]
+tmp <- data.frame(mau[CDu@annotation$is.miRNA,c(2,1)],name=CDu[CDu@annotation$is.miRNA,]@annotation$miRNA)
+tmp$name <- sapply(strsplit(as.character(tmp$name)," "),function(x) x[[1]][1])
+tmp$name <- substr(tmp$name,5,40)
+#only selecting subset for labeling
+tmp2 <- tmp[tmp$A > 2 & abs(tmp$M) > 0.5 ,]
+tmp3 <- tmp[tmp$A > 0 & abs(tmp$M) < 0.5 ,]
+
+
+gg <- ggplot(data = tmp2, aes(x = A, y = M))+ geom_hline(yintercept=c(-0.5,0,0.5),color="grey")+ geom_point(data=tmp3,aes(x=A,y=M),color="grey") + geom_text_repel(aes(label = name),box.padding = unit(0.75, "lines"),force=6) + geom_point(size=2,color="red") + labs(title="MA plot for microRNAs",x=expression(A==frac(1,2)~log[2]~(arp6%*%WT)),y=expression(M==~log[2]~frac(arp6,WT))) + scale_y_continuous(breaks=c(-14,-10,-5,-2,-0.5,0,0.5,2,5,10,14),labels=as.character,limits=c(-14,14))  + scale_x_continuous(breaks=c(0,2,5,10,14))
+save_plot("MA_plot_only_miRNAs.pdf",gg,base_height=9)
+
+mau.small <- mau[mau[,"A"] > 2 & abs(mau[,"M"]) > 0.5 ,]
+mau.small <- data.frame(mau[mau[,"A"] > 0,])
+
+gg <- ggplot(data = mau.small, aes(x = A, y = M))+ geom_point(size=0.5,color="grey") + geom_point(data=as.data.frame(tmp[tmp[,"A"]>0,]),aes(x=A,y=M),color="red") + labs(title="MA plot for all sRNA",x=expression(A==frac(1,2)~log[2]~(arp6%*%WT)),y=expression(M==~log[2]~frac(arp6,WT))) + scale_y_continuous(breaks=c(-14,-10,-5,-2,-0.5,0,0.5,2,5,10,14),labels=as.character,limits=c(-14,14))  + scale_x_continuous(breaks=c(0,2,5,10,14))+ geom_hline(yintercept=c(-0.5,0,0.5),color="black")
+save_plot("MA_plot_all.png",gg,base_height=9)
+
+text(tmp[,1],tmp[,2],
+points(tmp[,c(1,2)],col="red",pch=16,cex=1)
+abline(h=0,col="red")
+dev.off()
+
+#pdf(file="MAplot_WTvsPie1.pdf", width=14,height=14)
+png(file="MAplot_WTvsPie1.png", width=1800,height=1400)
+mau <- plotMA.CDreturn(CD, samplesA = "wt", samplesB = "pie1",col=1, pch=16, cex=1, normaliseData=F)
+points(mau[CD@annotation$width==24,c(2,1)],col="green")
+points(mau[CD@annotation$width==21,c(2,1)],col="orange")
+points(mau[CD@annotation$is.miRNA,c(2,1)],col="red")
+abline(h=0,col="red")
+dev.off()
+
+gg <- ggplot(subset(cntn_long,size %in% 15:30 & line != "pie1"),aes(y=value,x=Rep,fill=line)) + geom_bar(stat="identity",position="dodge") + facet_grid(. ~ size + line)
+ggsave(gg,file="sRNA_library_size_profiles_barplots_normalized.png",wi=20,hei=14)
+gg <- ggplot(subset(cntn_long,size %in% 20:25 & line != "pie1"),aes(y=value,x=Rep,fill=line)) + geom_bar(stat="identity",position="dodge") + facet_grid(. ~ size + line)
+ggsave(gg,file="sRNA_library_size_profiles_barplots20to25_normalized.png",wi=20,hei=14)
+gg <- ggplot(subset(cntn_long,size %in% 20:25 & line != "pie1"),aes(y=value,x=line,color=line)) + geom_point() + facet_grid(. ~ size)
+ggsave(gg,file="sRNA_library_size_profiles_pointplots_normalized.png",wi=10,hei=10)
+
+gg <- ggplot(subset(cntn_long,size %in% 20:25 & line != "pie1"),aes(y=value,x=Rep)) + geom_bar(stat="identity",position="dodge") + facet_grid(line ~ size)
+ggsave(gg,file="sRNA_library_size_profiles_barplot_byline_normalized.pdf",wi=10,hei=10)
+
+#pcts
+gg <- ggplot(subset(cntn_long_pct,size %in% 20:25 & line != "pie1"),aes(y=value,x=Rep,fill=line)) + geom_bar(stat="identity",position="dodge") + facet_grid(. ~ size + line)
+ggsave(gg,file="sRNA_library_size_profiles_barplots_pcts_total.pdf",wi=20,hei=14)
+#pcts only 21:24 size classes
+gg <- ggplot(subset(cntn_long_pct2124,size %in% 20:24 & line != "pie1"),aes(y=value,x=Rep,fill=line)) + geom_bar(stat="identity",position="dodge") + facet_grid(. ~ size + line)+ labs(title="",x="Replicates",y="% read counts") + scale_fill_grey()
+#ggsave(gg,file="sRNA_library_size_profiles_barplots_pcts_21to24.pdf",wi=20,hei=14)
+#figure x
+save_plot("sRNA_library_size_profiles_barplots_pcts_21to24.pdf",gg,base_height=7,base_aspect_ratio = 1.1)
+##
+
+
+
+chr = c("Chr1", "Chr2", "Chr3", "Chr4", "Chr5","chloroplast","mitochondria")
+chr_sizes <- c(30427671, 19698289, 23459830, 18585056, 26975502,154478,366924)
+names(chr_sizes) <- chr
+
+bins2e3 <- tileGenome(chr_sizes, tilewidth=2e3, cut.last.tile.in.chrom=T)
+bins2e3$ID <- paste(seqnames(bins2e3),start(bins2e3),sep="_")
+bins2e3$type <- "Bin2e3"
+bins5e4 <- tileGenome(chr_sizes, tilewidth=5e4, cut.last.tile.in.chrom=T)
+bins5e4$ID <- paste(seqnames(bins5e4),start(bins5e4),sep="_")
+bins5e4$type <- "Bin5e4"
+bins5e5 <- tileGenome(chr_sizes, tilewidth=5e5, cut.last.tile.in.chrom=T)
+bins5e5$ID <- paste(seqnames(bins5e5),start(bins5e5),sep="_")
+bins5e5$type <- "Bin5e5"
+
+
+########reading in BAM files for genomewide coverage plots
+bamFls.unique <- list.files(path,"unique.bam$",full=F)
+bamFls.multik1 <- list.files(path,"multi.k1.bam$",full=F)
+
+#unique gw coverage
+rownames(groupdf) <- bamFls.unique
+groupdf$mapping <- "unique"
+cov.5e5.unique <- gwcov(bins5e5,groupdf)
+cov.5e4.unique <- gwcov(bins5e4,groupdf)
+cov.2e3.unique <- gwcov(bins2e3,groupdf)
+
+#multi gw coverage
+rownames(groupdf) <- bamFls.multik1
+groupdf$mapping <- "multi"
+cov.5e5.multi <- gwcov(bins5e5,groupdf)
+cov.5e4.multi <- gwcov(bins5e4,groupdf)
+cov.2e3.multi <- gwcov(bins2e3,groupdf)
+
+save(cov.5e5.multi,cov.5e4.multi,cov.2e3.multi,cov.5e5.unique,cov.5e4.unique,cov.2e3.unique,file="gwcov.rdata")
+
+ggplot(subset(cov.5e5.unique$long,! seqnames %in% c("chloroplast","mitochondria")),aes(y=value,x=start,color=as.factor(Rep))) + geom_line() + facet_grid(line~seqnames) + ylim(0,1e5)
+ggplot(subset(cov.5e4.multi$long, seqnames %in% c("Chr1")),aes(y=value,x=start,color=as.factor(line))) + geom_line() + facet_grid(.~seqnames) + ylim(0,1e4)
+
+@
+his work was supported by the European Research
+Council Advanced Investigator Grant ERC-2013-AdG 340642,
